@@ -371,7 +371,7 @@ if __name__=="__main__":
     max_snippet_length = 200
     extra_checkpoint_info = "novice_demos"  #for finding checkpoint again
     epsilon_greedy_list = [1.0,0.75,0.5,0.25,0.01]#, 0.4, 0.2, 0.1]#[1.0, 0.5, 0.3, 0.1, 0.01]
-
+    epsilon_greedy_list_val = [0.9, 0.6, 0.3, 0.05]
 
 
     hist_length = 4
@@ -461,6 +461,7 @@ if __name__=="__main__":
     print("beginning evaluation")
     generator = DemoGenerator(agent, args.env_name, args.num_epsilon_greedy_demos, args.seed)
     ranked_demos = generator.get_pseudo_rankings(epsilon_greedy_list, add_noop=True)
+    ranked_demos_val = generator.get_pseudo_rankings(epsilon_greedy_list_val, add_noop=True)
 
     # ## Add the demonstrators demos as the highest ranked batch of trajectories, don't need actions
     # demo_demos = []
@@ -510,8 +511,30 @@ if __name__=="__main__":
                 print(i,p)
 
 
-    print("accuracy", calc_accuracy(reward_net, training_obs, training_labels))
-
+    print("training accuracy", calc_accuracy(reward_net, training_obs, training_labels))
 
     #TODO:add checkpoints to training process
     torch.save(reward_net.state_dict(), args.reward_model_path)
+
+
+    # validation
+    #remove the extra first dimension on the observations
+    _ranked_demos_val = ranked_demos_val
+    ranked_demos_val = []
+    for _r in _ranked_demos_val:
+        r = []
+        for _d in _r:
+            d = []
+            for _ob in _d:
+                ob = _ob[0]
+                d.append(ob)
+            r.append(d)
+        ranked_demos_val.append(r)
+
+    print("Validation with ", len(ranked_demos_val), "synthetically ranked batches of demos")
+
+    val_obs, val_labels = create_training_data_from_bins(ranked_demos_val, num_snippets, min_snippet_length, max_snippet_length)
+    print("num validation_obs", len(val_obs))
+    print("num_val_labels", len(val_labels))
+
+    print("validation accuracy", calc_accuracy(reward_net, val_obs, val_labels))
