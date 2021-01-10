@@ -161,7 +161,8 @@ class Net(nn.Module):
         x = F.leaky_relu(self.conv2(x))
         x = F.leaky_relu(self.conv3(x))
         x = F.leaky_relu(self.conv4(x))
-        x = x.view(-1, 784)
+        #print(x.shape)
+        x = x.contiguous().view(-1, 784)
         #x = x.view(-1, 1936)
         x = F.leaky_relu(self.fc1(x))
         #r = torch.tanh(self.fc2(x)) #clip reward?

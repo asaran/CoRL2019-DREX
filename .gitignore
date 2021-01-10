@@ -104,3 +104,11 @@ venv.bak/
 
 # mypy
 .mypy_cache/
+
+# models and experiment results
+drex-atari/checkpoints/*.pth.tar
+drex-atari/checkpoints/*.txt
+drex-atari/models/
+drex-atari/bc_degredation_data/
+drex-atari/learned_models/
+drex-atari/checkpoints/
