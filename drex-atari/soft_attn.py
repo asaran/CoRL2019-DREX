@@ -11,7 +11,7 @@ class LinearAttentionNoGlobalBlock(nn.Module):
 
     def forward(self, l):
         N, C, W, H = l.size()
-        c = self.op(l) # batch_sizex1xWxH
+        c = self.op(l) # batch_sizex1xWxH #collapse
         if self.normalize_attn:
             a = F.softmax(c.view(N,1,-1), dim=2).view(N,1,W,H)
         else:
@@ -22,7 +22,7 @@ class LinearAttentionNoGlobalBlock(nn.Module):
         else:
             g = F.adaptive_avg_pool2d(g, (1,1)).view(N,C)
         # return c.view(N,1,W,H), g # compatibility scores, soft-attn mask
-        return a, g # attn_mask, attn_masked_img
+        return a, g # attn_mask, attn_masked_featuremap
 
 
 class LinearAttentionBlock(nn.Module):

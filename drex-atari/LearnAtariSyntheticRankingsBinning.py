@@ -26,9 +26,13 @@ from pdb import set_trace
 from main_bc_degredation import generate_novice_demos
 from run_test import PPO2Agent
 import dataset
+from cnn import RewardNet as Net 
 
 
 def generate_demos(env, env_name, agent, checkpoint_path, num_demos):
+    # TOOD: accumulate gaze heatmaps from last 20 time steps
+    # CGL, RNN
+
     print("generating demos from checkpoint:", checkpoint_path)
 
     demonstrations = []
@@ -71,10 +75,17 @@ def generate_demos(env, env_name, agent, checkpoint_path, num_demos):
 
     return demonstrations, learning_returns
 
+# TODO: create demo snippets from a single trajectory spaced snippet length apart
+# all these snippets are associated with the same traj with a final return
+# run all these snippets through the reward net and get a score for all snippets, add them up and compare to final return
+# then compute spearman correlation on the cumulative predicted returns and absolute returns per trajectory
+
 
 #Takes as input a list of lists of demonstrations where first list is lowest ranked and last list is highest ranked
-def create_training_data_from_bins(_ranked_demos, num_snippets, min_snippet_length, max_snippet_length):
+def create_training_data_from_bins(_ranked_demos, num_snippets, min_snippet_length, max_snippet_length, overall_scores=False):
 
+    # add an absolute overall rank to each demo snippet label
+    final_scores = []
 
     step = 4
     #n_train = 3000 #number of pairs of trajectories to create
@@ -101,10 +112,12 @@ def create_training_data_from_bins(_ranked_demos, num_snippets, min_snippet_leng
         min_length = min(len(ti), len(tj))
         rand_length = np.random.randint(min_snippet_length, max_snippet_length)
         if bi < bj: #bin_j is better so pick tj snippet to be later than ti
+            # print(min_length - rand_length + 1)
             ti_start = np.random.randint(min_length - rand_length + 1)
             #print(ti_start, len(demonstrations[tj]))
             tj_start = np.random.randint(ti_start, len(tj) - rand_length + 1)
         else: #ti is better so pick later snippet in ti
+            # print(min_length - rand_length + 1)
             tj_start = np.random.randint(min_length - rand_length + 1)
             #print(tj_start, len(demonstrations[ti]))
             ti_start = np.random.randint(tj_start, len(ti) - rand_length + 1)
@@ -124,66 +137,21 @@ def create_training_data_from_bins(_ranked_demos, num_snippets, min_snippet_leng
             label = 0
         else:
             label = 1
+
         training_obs.append((snip_i, snip_j))
         training_labels.append(label)
+        final_scores.append((bi,bj))
 
-
-    return training_obs, training_labels
-
-
-
-
-
-
-
-class Net(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-        self.conv1 = nn.Conv2d(4, 32, 7, stride=3)
-        self.conv2 = nn.Conv2d(32, 16, 5, stride=2)
-        self.conv3 = nn.Conv2d(16, 16, 3, stride=1)
-        self.conv4 = nn.Conv2d(16, 16, 3, stride=1)
-        self.fc1 = nn.Linear(784, 64)
-        #self.fc1 = nn.Linear(1936,64)
-        self.fc2 = nn.Linear(64, 1)
+    if overall_scores:
+        return training_obs, training_labels, final_scores
+    else:
+        return training_obs, training_labels
 
 
 
-    def cum_return(self, traj):
-        '''calculate cumulative return of trajectory'''
-        sum_rewards = 0
-        sum_abs_rewards = 0
-        #print(traj.shape)
-        x = traj.permute(0,3,1,2) #get into NCHW format
-        #compute forward pass of reward network
-        x = F.leaky_relu(self.conv1(x))
-        x = F.leaky_relu(self.conv2(x))
-        x = F.leaky_relu(self.conv3(x))
-        x = F.leaky_relu(self.conv4(x))
-        #print(x.shape)
-        x = x.contiguous().view(-1, 784)
-        #x = x.view(-1, 1936)
-        x = F.leaky_relu(self.fc1(x))
-        #r = torch.tanh(self.fc2(x)) #clip reward?
-        #r = F.celu(self.fc2(x))
-        r = self.fc2(x)
-        sum_rewards += torch.sum(r)
-        sum_abs_rewards += torch.sum(torch.abs(r))
-        ##    y = self.scalar(torch.ones(1))
-        ##    sum_rewards += y
-        #print("sum rewards", sum_rewards)
-        return sum_rewards, sum_abs_rewards
 
 
 
-    def forward(self, traj_i, traj_j):
-        '''compute cumulative return for each trajectory and return logits'''
-        #print([self.cum_return(traj_i), self.cum_return(traj_j)])
-        cum_r_i, abs_r_i = self.cum_return(traj_i)
-        cum_r_j, abs_r_j = self.cum_return(traj_j)
-        #print(abs_r_i + abs_r_j)
-        return torch.cat((cum_r_i.unsqueeze(0), cum_r_j.unsqueeze(0)),0), abs_r_i + abs_r_j
 
 
 
@@ -223,12 +191,13 @@ def learn_reward(reward_network, optimizer, training_inputs, training_outputs, n
 
             #forward + backward + optimize
             outputs, abs_rewards = reward_network.forward(traj_i, traj_j)
+            abs_rewards_sum = sum(abs_rewards)
             #print(outputs[0], outputs[1])
             #print(labels.item())
             outputs = outputs.unsqueeze(0)
             #print("outputs", outputs)
             #print("labels", labels)
-            loss = loss_criterion(outputs, labels) + l1_reg * abs_rewards
+            loss = loss_criterion(outputs, labels) + l1_reg * abs_rewards_sum
             # if labels == 0:
             #     #print("label 0")
             #     loss = torch.log(1 + torch.exp(outputs[1] - outputs[0]))
@@ -259,7 +228,7 @@ def learn_reward(reward_network, optimizer, training_inputs, training_outputs, n
                         print("Stopping to prevent overfitting after {} ".format(count))
                         early_stop = True
                         break
-                print(abs_rewards)
+                # print('absolute reward: '.format(abs_rewards))
                 cum_loss = 0.0
         if early_stop:
             print("early stop!!!!!!!")
@@ -298,7 +267,47 @@ def calc_accuracy(reward_network, training_inputs, training_outputs):
     return num_correct / len(training_inputs)
 
 
+def calc_overall_ranking_accuracy(reward_network, inputs, returns):
+    # TODO: The correlation could also be computed with predicted returns over all snippets in a trajectory
+    from scipy import stats
+    
+    predicted_returns = []
+    gt_returns = []
 
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    loss_criterion = nn.CrossEntropyLoss()
+    #print(training_data[0])
+    num_correct = 0.
+    with torch.no_grad():
+        for i in range(len(inputs)):
+            # label = training_outputs[i]
+            #print(inputs)
+            #print(labels)
+            traj_i, traj_j = inputs[i]
+            traj_i = np.array(traj_i)
+            traj_j = np.array(traj_j)
+            traj_i = torch.from_numpy(traj_i).float().to(device)
+            traj_j = torch.from_numpy(traj_j).float().to(device)
+
+            #forward to get logits
+            outputs, abs_return = reward_network.forward(traj_i, traj_j)
+            print(type(abs_return), type(returns))
+            predicted_returns.append(abs_return[0].item())
+            predicted_returns.append(abs_return[1].item())
+            gt_returns.append(returns[i][0])
+            gt_returns.append(returns[i][1])
+
+            #print(outputs)
+    #         _, pred_label = torch.max(outputs,0)
+    #         #print(pred_label)
+    #         #print(label)
+    #         if pred_label.item() == label:
+    #             num_correct += 1.
+    # return num_correct / len(training_inputs)
+    print(predicted_returns)
+    print(len(predicted_returns), len(gt_returns))
+    spearman_corr, p = stats.spearmanr(predicted_returns, gt_returns)
+    return spearman_corr
 
 
 
@@ -321,11 +330,11 @@ if __name__=="__main__":
     parser.add_argument('--env_name', default='', help='Select the environment name to run, i.e. pong')
     parser.add_argument('--reward_model_path', default='', help="name and location for learned model params")
     parser.add_argument('--seed', default=0, help="random seed for experiments")
-    parser.add_argument("--num_bc_eval_episodes", type=int, default = 2, help="number of epsilon greedy BC demos to generate")
-    parser.add_argument("--num_epsilon_greedy_demos", type=int, default=20, help="number of times to generate rollouts from each noise level")
+    parser.add_argument("--num_bc_eval_episodes", type=int, default = 1, help="number of epsilon greedy BC demos to generate") #2
+    parser.add_argument("--num_epsilon_greedy_demos", type=int, default=1, help="number of times to generate rollouts from each noise level") #20
     parser.add_argument("--checkpoint_path", help="path to checkpoint to run agent for demos")
-    parser.add_argument("--num_demos", help="number of demos to generate", default=10, type=int)
-    parser.add_argument("--num_bc_steps", default = 75000, type=int, help='number of steps of BC to run')
+    parser.add_argument("--num_demos", help="number of demos to generate", default=4, type=int) #10
+    parser.add_argument("--num_bc_steps", default = 10, type=int, help='number of steps of BC to run') #75000
 
     parser.add_argument("--minibatch-size", type=int, default=32)
     parser.add_argument("--hist-len", type=int, default=4)
@@ -335,6 +344,8 @@ if __name__=="__main__":
     parser.add_argument("--l2-penalty", type=float, default=0.00)
     parser.add_argument("--checkpoint-dir", type=str, default="./checkpoints")
     parser.add_argument('--epsilon_greedy', default = 0.0, type=float, help="fraction of actions chosen at random for rollouts")
+
+    parser.add_argument("--soft_attn", default=None, type=str, choices=['Global','NoGlobal',None], help='type of soft attention layer')
 
     args = parser.parse_args()
     env_name = args.env_name
@@ -362,11 +373,11 @@ if __name__=="__main__":
     #snippet_length = 50 #length of trajectory for training comparison
     lr = 0.00001
     weight_decay = 0.0
-    num_iter = 10 #num times through training data
+    num_iter = 1#10 #num times through training data
     l1_reg=0.0
     stochastic = True
     bin_width = 0 #only bin things that have the same score
-    num_snippets = 40000
+    num_snippets = 1000 #40000
     min_snippet_length = 50
     max_snippet_length = 200
     extra_checkpoint_info = "novice_demos"  #for finding checkpoint again
@@ -458,7 +469,7 @@ if __name__=="__main__":
     #minimal_action_set = acion_set
 
     #agent = Clone(list(minimal_action_set), hist_length, args.checkpoint_bc_policy)
-    print("beginning evaluation")
+    print("****beginning evaluation*****")
     generator = DemoGenerator(agent, args.env_name, args.num_epsilon_greedy_demos, args.seed)
     ranked_demos = generator.get_pseudo_rankings(epsilon_greedy_list, add_noop=True)
     ranked_demos_val = generator.get_pseudo_rankings(epsilon_greedy_list_val, add_noop=True)
@@ -492,7 +503,10 @@ if __name__=="__main__":
     print("num_labels", len(training_labels))
     # Now we create a reward network and optimize it using the training data.
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    reward_net = Net()
+    if args.soft_attn:
+        reward_net = Net(args.soft_attn)
+    else:
+        reward_net = Net()
     reward_net.to(device)
     import torch.optim as optim
     optimizer = optim.Adam(reward_net.parameters(),  lr=lr, weight_decay=weight_decay)
@@ -533,8 +547,10 @@ if __name__=="__main__":
 
     print("Validation with ", len(ranked_demos_val), "synthetically ranked batches of demos")
 
-    val_obs, val_labels = create_training_data_from_bins(ranked_demos_val, num_snippets, min_snippet_length, max_snippet_length)
+    val_obs, val_labels, val_returns = create_training_data_from_bins(ranked_demos_val, num_snippets, min_snippet_length, max_snippet_length, True)
     print("num validation_obs", len(val_obs))
     print("num_val_labels", len(val_labels))
 
-    print("validation accuracy", calc_accuracy(reward_net, val_obs, val_labels))
+    print("validation accuracy ", calc_accuracy(reward_net, val_obs, val_labels))
+    print("validation correlation ", calc_overall_ranking_accuracy(reward_net, val_obs, val_returns))
+    print("\n")
